@@ -86,6 +86,10 @@ Window {
             }
         }
 
+        onCertificateError: function(error) {
+            error.acceptCertificate();
+        }
+
         onShowErrorPage: function(requestErrorCode) {
             errorLoading = true
             webViewException.errorCode = requestErrorCode
