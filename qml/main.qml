@@ -9,11 +9,10 @@
 import QtQuick 2.15
 import QtQuick.Window 2.15
 
-import QtWebEngine 1.7
-import QtQuick.VirtualKeyboard 2.2
-import QtQuick.VirtualKeyboard.Settings 2.2
+import QtWebEngine 6.3
 
 import Browser 1.0
+
 
 Window {
     id: window
@@ -21,86 +20,99 @@ Window {
 
     visible: true
     color: "black"
-  
-    Flickable {
-        id: flickable
+    
+    WebEngineView {
+        id: webViewException
+        backgroundColor: "black"
+        url: ""
+        property int errorCode
         anchors.fill: parent
-
-        width: window.width
-        height: window.height
-        contentWidth: window.width
-        contentHeight: window.height
-        boundsBehavior: Flickable.OvershootBounds
-        flickableDirection: Flickable.VerticalFlick
-        interactive: false
-
-        WebEngineView {
-            id: webView
-            backgroundColor: "black"
-
-            url: "http://www.ossystems.com.br"
-
-            anchors.fill: parent
-            visible: false
-
-            property bool disableContextMenu: false
-
-            onLoadingChanged: function(loadRequest) {
-                if (loadRequest.status == WebEngineView.LoadSucceededStatus) {
-                    webView.visible = true;
-                    splash.visible = false;
-                }
+        visible: false
+        onRenderProcessTerminated: { Qt.exit(1) }
+        onLoadingChanged: function(loadingInfo) {
+            switch (loadingInfo.status) {
+            case WebEngineLoadingInfo.LoadSucceededStatus:
+                webViewException.runJavaScript("document.getElementById('custom-error-content').innerHTML = document.getElementById('custom-error-content').innerHTML.replace('%CODE%'," + errorCode + ");");
+                break
+            case WebEngineView.LoadFailedStatus:
+                console.log("exception page loading failure: ", loadingInfo.errorString)
+                break
             }
+        }
+    }
 
-            onContextMenuRequested: {
-                request.accepted = disableContextMenu;
+    WebEngineView {
+        id: webView
+        backgroundColor: "black"
+        url: "https://www.fancom.com"
+        property bool errorLoading: false
+        signal showErrorPage(int requestErrorCode)
+        anchors.fill: parent
+        profile.httpCacheType: WebEngineProfile.NoCache
+        visible: false
+        property bool disableContextMenu: false
+    
+        onRenderProcessTerminated: { Qt.exit(1) }
+        onLoadingChanged: function(loadingInfo) {
+            switch (loadingInfo.status) {
+            case WebEngineView.LoadStartedStatus:
+                errorLoading = false
+                break
+            case WebEngineLoadingInfo.LoadSucceededStatus:
+                errorLoading = false
+                webView.visible = true
+                splash.visible = false;
+                break
+            case WebEngineView.LoadStoppedStatus:
+            case WebEngineLoadingInfo.LoadFailedStatus:
+                showErrorPage(loadingInfo.errorCode);
+                break
+            }
+        }
+        onContextMenuRequested: {
+            request.accepted = disableContextMenu;
+        }
+        onTouchSelectionMenuRequested: function(request) {
+                request.accepted =disableContextMenu;
+        }
+        onJavaScriptConsoleMessage: {
+            if (level === WebEngineView.ErrorMessageLevel) {
+                // https://rollbar.com/blog/javascript-chunk-load-error/#
+                // target chunkloaderror
+                if (webViewException.url.toString() !== "" && message.indexOf("ChunkLoadError") >= 0) {
+                    console.error("Show errorpage due to JS error")
+                    showErrorPage(500);
+                }
             }
         }
 
-        property var elementWithFocusY: 0
-        property var elementWithFocusHeight: 0
-
-        function adjust() {
-            if (!Qt.inputMethod.visible) {
-                flickable.contentY = 0;
-                return
+        onShowErrorPage: function(requestErrorCode) {
+            errorLoading = true
+            webViewException.errorCode = requestErrorCode
+            if (webViewException.url.toString().length > 0) {
+                splash.visible = false;
+                webView.visible = false
+                webViewException.visible = true
+                reloader.restart()
             }
-
-            // get the height of the element with focus, needs to be in a dedicated JS call as it can only return plain data
-            webView.runJavaScript("document.activeElement.getBoundingClientRect().height;",
-                function(result) {
-                    // store the height
-                    flickable.elementWithFocusHeight = result;
-                }
-            )
-
-            // get the y position of the element with focus, needs to be in a dedicated JS call as it can only return plain data
-            webView.runJavaScript("document.activeElement.getBoundingClientRect().y;",
-                function(result) {
-                    // store the y position
-                    flickable.elementWithFocusY = result;
-                    // take some margin to prevent placing directly against the top
-                    var elementWithFocusYMinusMargin = flickable.elementWithFocusY - 15
-                    //take some margin to prevent placing against the input panel at the bottom
-                    var elementWithFocusHeightPlusMargin = flickable.elementWithFocusHeight + 15
-                    // check if element will be covered by input panel
-                    if ((flickable.elementWithFocusY + elementWithFocusHeightPlusMargin) > (webView.height - inputPanel.height)) {
-                        flickable.contentY = elementWithFocusYMinusMargin
-                    }
-                }
-            )
         }
     }
 
     Timer {
-        id: adjuster
-        interval: 200
-        onTriggered: flickable.adjust()
+        id: reloader
+        interval: 0
+        onTriggered: {
+            if (webView.errorLoading) {
+                webView.reloadAndBypassCache()
+            }
+        }
+
+        function start() {
+            this.running = this.interval > 0;
+        }
     }
 
     Component.onCompleted: {
-        Qt.inputMethod.visibleChanged.connect(adjuster.restart)
-
         var xhr = new XMLHttpRequest();
         let conf = "file:" + (Qt.application.arguments.slice(1).find(arg => !arg.startsWith("--")) || "settings.json");
         console.log("Loading configuration from '" + conf + "'");
@@ -110,10 +122,6 @@ Window {
                 if (xhr.responseText.trim().length != 0) {
                     try {
                         var settings = JSON.parse(xhr.responseText);
-
-                        if (typeof settings["ScreenSaverTimeout"] != "undefined") {
-                            screenSaverTimer.interval = parseInt(settings["ScreenSaverTimeout"]);
-                        }
 
                         if (typeof settings["RestartTimeout"] != "undefined") {
                             restartTimer.interval = parseInt(settings["RestartTimeout"]);
@@ -134,6 +142,16 @@ Window {
 
                         if (typeof settings["SplashScreen"] != "undefined") {
                             splash.source = settings["SplashScreen"];
+                        }
+
+                        if (typeof settings["ErrorURL"] != "undefined") {
+                            webViewException.url = settings["ErrorURL"];
+                            webView.settings.errorPageEnabled = false
+                            webViewException.settings.errorPageEnabled = false
+                        }
+
+                        if (typeof settings["RetryInterval"] != "undefined") {
+                            reloader.interval = parseInt(settings["RetryInterval"]);
                         }
 
                         if (typeof settings["DisableContextMenu"] != "undefined") {
@@ -161,54 +179,9 @@ Window {
         }
     }
 
-    InputPanel {
-        id: inputPanel
-
-        y: Qt.inputMethod.visible ? parent.height - inputPanel.height : parent.height
-
-        anchors.left: parent.left
-        anchors.right: parent.right
-    }
-
-    Rectangle {
-        id: screenSaver
-        color: "black"
-        visible: false
-        anchors.fill: parent
-
-        MouseArea {
-            anchors.fill: parent
-
-            onClicked: {
-                screenSaver.visible = false
-            }
-        }
-    }
-
-    InputEventHandler {
-        onTriggered: {
-            screenSaverTimer.restart();
-        }
-    }
-
-    Timer {
-        id: screenSaverTimer
-        interval: 60000 * 20 // 20 minutes
-        running: interval > 0
-        repeat: false
-
-        onTriggered: {
-            if (this.interval > 0) {
-                screenSaver.visible = true;
-                restartTimer.start();
-            }
-        }
-    }
-
     Timer {
         id: restartTimer
         interval: 60000 * 3 // 3 minutes
-        repeat: false
 
         onTriggered: Browser.restart()
 

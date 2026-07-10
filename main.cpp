@@ -24,10 +24,13 @@ int main(int argc, char *argv[])
 
     qputenv("QT_IM_MODULE", QByteArray("qtvirtualkeyboard"));
     qputenv("QML_XHR_ALLOW_FILE_READ", QByteArray("1"));
+    qputenv("QTWEBENGINE_CHROMIUM_FLAGS", "--disable-pinch --enable-smooth-scrolling");
     
     QtWebEngineQuick::initialize();
 
     QGuiApplication app(argc, argv);
+    app.setApplicationName("Chrome");
+    app.setApplicationVersion("118.0.5993.220");
 
     ProxyHandler proxyHandler;
     proxyHandler.useSystemProxy();
