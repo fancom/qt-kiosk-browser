@@ -46,12 +46,25 @@ Window {
         backgroundColor: "black"
         url: "https://www.fancom.com"
         property bool errorLoading: false
+        property int loadStage: 0          // 0 = primary URL, 1 = fallback URL
+        property url primaryUrl: ""
+        property url fallbackUrl: ""
         signal showErrorPage(int requestErrorCode)
         anchors.fill: parent
         profile.httpCacheType: WebEngineProfile.NoCache
         visible: false
         property bool disableContextMenu: false
-    
+
+        function handleLoadFailure(errorCode) {
+            if (webView.loadStage === 0 && webView.fallbackUrl.toString().length > 0) {
+                console.log("Primary URL failed (code " + errorCode + "), trying FallbackURL");
+                webView.loadStage = 1;
+                webView.url = webView.fallbackUrl;
+            } else {
+                showErrorPage(errorCode);
+            }
+        }
+
         onRenderProcessTerminated: { Qt.exit(1) }
         onLoadingChanged: function(loadingInfo) {
             switch (loadingInfo.status) {
@@ -65,7 +78,7 @@ Window {
                 break
             case WebEngineView.LoadStoppedStatus:
             case WebEngineLoadingInfo.LoadFailedStatus:
-                showErrorPage(loadingInfo.errorCode);
+                handleLoadFailure(loadingInfo.errorCode);
                 break
             }
         }
@@ -77,11 +90,9 @@ Window {
         }
         onJavaScriptConsoleMessage: {
             if (level === WebEngineView.ErrorMessageLevel) {
-                // https://rollbar.com/blog/javascript-chunk-load-error/#
-                // target chunkloaderror
                 if (webViewException.url.toString() !== "" && message.indexOf("ChunkLoadError") >= 0) {
                     console.error("Show errorpage due to JS error")
-                    showErrorPage(500);
+                    handleLoadFailure(500);
                 }
             }
         }
@@ -107,7 +118,12 @@ Window {
         interval: 0
         onTriggered: {
             if (webView.errorLoading) {
-                webView.reloadAndBypassCache()
+                webView.loadStage = 0;
+                if (webView.url == webView.primaryUrl) {
+                    webView.reloadAndBypassCache();
+                } else {
+                    webView.url = webView.primaryUrl;
+                }
             }
         }
 
@@ -132,7 +148,12 @@ Window {
                         }
 
                         if (typeof settings["URL"] != "undefined") {
+                            webView.primaryUrl = settings["URL"];
                             webView.url = settings["URL"];
+                        }
+
+                        if (typeof settings["FallbackURL"] != "undefined") {
+                            webView.fallbackUrl = settings["FallbackURL"];
                         }
 
                         for (var key in settings["WebEngineSettings"]) {
@@ -181,6 +202,18 @@ Window {
                 visible = true;
             }
         }
+    }
+
+    Image {
+        id: fallbackIndicator
+        source: "qrc:/icons/warning.svg"
+        width: 32
+        height: 32
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: 16
+        visible: webView.loadStage === 1 && webView.visible
+        z: 10
     }
 
     Timer {
