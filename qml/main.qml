@@ -327,7 +327,7 @@ Window {
         height: 32
         anchors.top: parent.top
         anchors.left: parent.left
-        anchors.margins: 32
+        anchors.margins: 20
         visible: webView.loadStage === 1
         z: 10
     }
