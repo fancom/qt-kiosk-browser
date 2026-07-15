@@ -20,7 +20,7 @@ Window {
 
     visible: true
     color: "black"
-    
+
     WebEngineView {
         id: webViewException
         backgroundColor: "black"
@@ -46,9 +46,9 @@ Window {
         backgroundColor: "black"
         url: "https://www.fancom.com"
         property bool errorLoading: false
-        property int loadStage: 0          // 0 = primary URL, 1 = fallback URL
+        property int loadStage: 0          // 0 = HTTPS active, 1 = HTTP fallback active, 2 = error page
         property url primaryUrl: ""
-        property url fallbackUrl: ""
+        property bool fallbackToHttp: false
         signal showErrorPage(int requestErrorCode)
         anchors.fill: parent
         profile.httpCacheType: WebEngineProfile.NoCache
@@ -56,11 +56,23 @@ Window {
         property bool disableContextMenu: false
 
         function handleLoadFailure(errorCode) {
-            if (webView.loadStage === 0 && webView.fallbackUrl.toString().length > 0) {
-                console.log("Primary URL failed (code " + errorCode + "), trying FallbackURL");
+            if (webView.loadStage === 0 && webView.fallbackToHttp) {
+                console.log("HTTPS failed (code " + errorCode + "), falling back to HTTP");
                 webView.loadStage = 1;
-                webView.url = webView.fallbackUrl;
-            } else {
+                webView.visible = false;
+                httpsStabilityTimer.stop();
+
+                var httpUrl = webView.primaryUrl.toString().replace(/^https:/i, "http:");
+                if (httpFallbackLoader.active && httpFallbackLoader.item) {
+                    // Renderer still warm from a previous fallback - just re-navigate,
+                    // no process spin-up cost.
+                    httpFallbackLoader.item.url = httpUrl;
+                    httpFallbackLoader.item.visible = true;
+                } else {
+                    httpFallbackLoader.active = true; // cold start - never created, or fully torn down
+                }
+            } else if (webView.loadStage !== 2) {
+                webView.loadStage = 2;
                 showErrorPage(errorCode);
             }
         }
@@ -73,12 +85,33 @@ Window {
                 break
             case WebEngineLoadingInfo.LoadSucceededStatus:
                 errorLoading = false
-                webView.visible = true
-                splash.visible = false;
+                if (webView.loadStage === 1) {
+                    // Background recovery check succeeded - HTTPS is back.
+                    console.log("HTTPS reachable again, switching display back from HTTP");
+                    webView.loadStage = 0;
+                    webView.visible = true;
+                    splash.visible = false;
+                    if (httpFallbackLoader.item) {
+                        // Kill JS timers/websockets on the HTTP page immediately,
+                        // but keep the renderer process warm in case HTTPS flaps.
+                        httpFallbackLoader.item.url = "about:blank";
+                        httpFallbackLoader.item.visible = false;
+                    }
+                    httpsStabilityTimer.restart(); // only free the renderer after this elapses
+                } else {
+                    webView.visible = true;
+                    splash.visible = false;
+                }
                 break
             case WebEngineView.LoadStoppedStatus:
             case WebEngineLoadingInfo.LoadFailedStatus:
-                handleLoadFailure(loadingInfo.errorCode);
+                if (webView.loadStage === 1) {
+                    // Background HTTPS recheck failed - stay on HTTP fallback, try again later.
+                    console.log("HTTPS recheck failed, staying on HTTP fallback");
+                    httpsStabilityTimer.stop();
+                } else {
+                    handleLoadFailure(loadingInfo.errorCode);
+                }
                 break
             }
         }
@@ -90,7 +123,7 @@ Window {
         }
         onJavaScriptConsoleMessage: {
             if (level === WebEngineView.ErrorMessageLevel) {
-                if (webViewException.url.toString() !== "" && message.indexOf("ChunkLoadError") >= 0) {
+                if (webView.loadStage === 0 && webViewException.url.toString() !== "" && message.indexOf("ChunkLoadError") >= 0) {
                     console.error("Show errorpage due to JS error")
                     handleLoadFailure(500);
                 }
@@ -107,8 +140,80 @@ Window {
             if (webViewException.url.toString().length > 0) {
                 splash.visible = false;
                 webView.visible = false
+                httpFallbackLoader.active = false
                 webViewException.visible = true
                 reloader.restart()
+            }
+        }
+    }
+
+    Loader {
+        id: httpFallbackLoader
+        anchors.fill: parent
+        active: false
+
+        sourceComponent: WebEngineView {
+            id: webViewHttp
+            backgroundColor: "black"
+            url: "" // set explicitly by webView.handleLoadFailure() on (re)activation
+            profile.httpCacheType: WebEngineProfile.NoCache
+            visible: true
+
+            onRenderProcessTerminated: { Qt.exit(1) }
+
+            onLoadingChanged: function(loadingInfo) {
+                switch (loadingInfo.status) {
+                case WebEngineLoadingInfo.LoadSucceededStatus:
+                    if (webViewHttp.url.toString() !== "about:blank") {
+                        webViewHttp.visible = true;
+                        splash.visible = false;
+                    }
+                    break
+                case WebEngineView.LoadStoppedStatus:
+                case WebEngineLoadingInfo.LoadFailedStatus:
+                    if (webViewHttp.url.toString() !== "about:blank") {
+                        console.log("HTTP fallback failed: ", loadingInfo.errorString)
+                        webView.loadStage = 2;
+                        webView.showErrorPage(loadingInfo.errorCode);
+                    }
+                    break
+                }
+            }
+
+            onContextMenuRequested: {
+                request.accepted = webView.disableContextMenu;
+            }
+            onTouchSelectionMenuRequested: function(request) {
+                request.accepted = webView.disableContextMenu;
+            }
+        }
+    }
+
+    // Periodically re-checks whether HTTPS has become reachable again while
+    // the HTTP fallback is what's actually on screen.
+    Timer {
+        id: httpsRecoveryTimer
+        interval: 30000
+        repeat: true
+        running: webView.loadStage === 1
+        onTriggered: {
+            console.log("Checking whether HTTPS is available again...");
+            webView.reloadAndBypassCache();
+        }
+    }
+
+    // Grace period after HTTPS recovers before the HTTP fallback renderer is
+    // actually torn down. Lets a flappy connection fall back to HTTP again
+    // instantly (reusing the warm renderer) instead of paying process
+    // spin-up cost on every blip.
+    Timer {
+        id: httpsStabilityTimer
+        interval: 300000 // 5 minutes
+        repeat: false
+        onTriggered: {
+            if (webView.loadStage === 0) {
+                console.log("HTTPS stable for grace period, releasing HTTP fallback renderer");
+                httpFallbackLoader.active = false;
             }
         }
     }
@@ -152,8 +257,16 @@ Window {
                             webView.url = settings["URL"];
                         }
 
-                        if (typeof settings["FallbackURL"] != "undefined") {
-                            webView.fallbackUrl = settings["FallbackURL"];
+                        if (typeof settings["FallbackToHttp"] != "undefined") {
+                            webView.fallbackToHttp = settings["FallbackToHttp"];
+                        }
+
+                        if (typeof settings["HttpsRecoveryInterval"] != "undefined") {
+                            httpsRecoveryTimer.interval = parseInt(settings["HttpsRecoveryInterval"]);
+                        }
+
+                        if (typeof settings["HttpsStabilityInterval"] != "undefined") {
+                            httpsStabilityTimer.interval = parseInt(settings["HttpsStabilityInterval"]);
                         }
 
                         for (var key in settings["WebEngineSettings"]) {
@@ -210,9 +323,9 @@ Window {
         width: 32
         height: 32
         anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.margins: 16
-        visible: webView.loadStage === 1 && webView.visible
+        anchors.left: parent.left
+        anchors.margins: 32
+        visible: webView.loadStage === 1
         z: 10
     }
 
