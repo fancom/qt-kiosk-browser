@@ -63,13 +63,16 @@ Window {
                 httpsStabilityTimer.stop();
 
                 var httpUrl = webView.primaryUrl.toString().replace(/^https:/i, "http:");
-                if (httpFallbackLoader.active && httpFallbackLoader.item) {
-                    // Renderer still warm from a previous fallback - just re-navigate,
-                    // no process spin-up cost.
+
+                if (!httpFallbackLoader.active) {
+                    httpFallbackLoader.active = true; // synchronous - item is ready right after this
+                }
+
+                if (httpFallbackLoader.item) {
                     httpFallbackLoader.item.url = httpUrl;
                     httpFallbackLoader.item.visible = true;
                 } else {
-                    httpFallbackLoader.active = true; // cold start - never created, or fully torn down
+                    console.error("httpFallbackLoader.item unavailable after activation");
                 }
             } else if (webView.loadStage !== 2) {
                 webView.loadStage = 2;
